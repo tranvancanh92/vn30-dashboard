@@ -62,7 +62,7 @@ def load_data(symbol: str, interval: str = "1D") -> pd.DataFrame:
         days  = DAYS_MAP.get(interval, 300)
         start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         end   = datetime.now().strftime("%Y-%m-%d")
-        q     = Quote(symbol=symbol, source="TCBS")
+        q     = Quote(symbol=symbol, source="VCI")
         df    = q.history(start=start, end=end, interval=interval)
         if df is None or df.empty:
             return pd.DataFrame()
