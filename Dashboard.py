@@ -56,7 +56,7 @@ def get_expiry():
 # ══════════════════════════════════════════
 # 2. Tải dữ liệu — có cache 5 phút
 # ══════════════════════════════════════════
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def load_data(symbol: str, interval: str = "1D") -> pd.DataFrame:
     try:
         days  = DAYS_MAP.get(interval, 300)
