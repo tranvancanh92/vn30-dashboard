@@ -54,9 +54,9 @@ def get_expiry():
 
 
 # ══════════════════════════════════════════
-# 2. Tải dữ liệu — có cache 5 phút
+# 2. Tải dữ liệu — cache 60s (bớt lâu hơn)
 # ══════════════════════════════════════════
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_data(symbol: str, interval: str = "1D") -> pd.DataFrame:
     try:
         days  = DAYS_MAP.get(interval, 300)
@@ -65,13 +65,14 @@ def load_data(symbol: str, interval: str = "1D") -> pd.DataFrame:
         q     = Quote(symbol=symbol, source="VCI")
         df    = q.history(start=start, end=end, interval=interval)
         if df is None or df.empty:
+            logger.warning(f"{symbol} returned empty data")
             return pd.DataFrame()
         df.columns = [c.capitalize() for c in df.columns]
         dc = "Date" if "Date" in df.columns else "Time"
         df["Date"] = pd.to_datetime(df[dc])
         return df.set_index("Date").sort_index()
     except Exception as e:
-        logger.warning("%s %s: %s", symbol, interval, e)
+        logger.warning("%s %s: %s", symbol, interval, str(e)[:100])
         return pd.DataFrame()
 
 
@@ -86,65 +87,69 @@ def calc_indicators_cached(symbol: str, interval: str) -> pd.DataFrame:
 def _calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < 30:
         return df
-    df = df.copy()
-    # EMA + BB
-    df["EMA20"]    = df["Close"].ewm(span=20, adjust=False).mean()
-    df["Std"]      = df["Close"].rolling(20).std()
-    df["BB_Upper"] = df["EMA20"] + df["Std"] * 2
-    df["BB_Lower"] = df["EMA20"] - df["Std"] * 2
-    # BB Squeeze: BandWidth thấp = đang tích lũy
-    df["BW"]       = (df["BB_Upper"] - df["BB_Lower"]) / df["EMA20"]
-    bw_min20       = df["BW"].rolling(20).min()
-    df["Squeeze"]  = df["BW"] <= bw_min20 * 1.05   # True = đang nén
-    # MACD
-    e1 = df["Close"].ewm(span=12, adjust=False).mean()
-    e2 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"]   = e1 - e2
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["Hist"]   = df["MACD"] - df["Signal"]
-    # RSI
-    delta        = df["Close"].diff()
-    gain         = delta.where(delta > 0, 0).rolling(14).mean()
-    loss         = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df["RSI"]    = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
-    # Stochastic %K %D (14,3)
-    lo14         = df["Low"].rolling(14).min()
-    hi14         = df["High"].rolling(14).max()
-    df["Stoch_K"] = 100 * (df["Close"] - lo14) / (hi14 - lo14).replace(0, np.nan)
-    df["Stoch_D"] = df["Stoch_K"].rolling(3).mean()
-    # Volume spike: so với trung bình 20 phiên
-    df["Vol_MA20"]   = df["Volume"].rolling(20).mean() if "Volume" in df.columns else 1
-    df["Vol_Ratio"]  = df["Volume"] / df["Vol_MA20"].replace(0, np.nan) if "Volume" in df.columns else 1
-    
-    # Phân kỳ MACD (Divergence)
-    bull_divs = np.zeros(len(df), dtype=bool)
-    bear_divs = np.zeros(len(df), dtype=bool)
-    p = df["Close"].values
-    h = df["Hist"].values
-    for k in range(5, len(df)):
-        start_idx = max(0, k-15)
-        window_p = p[start_idx:k+1]
-        window_h = h[start_idx:k+1]
+    try:
+        df = df.copy()
+        # EMA + BB
+        df["EMA20"]    = df["Close"].ewm(span=20, adjust=False).mean()
+        df["Std"]      = df["Close"].rolling(20).std()
+        df["BB_Upper"] = df["EMA20"] + df["Std"] * 2
+        df["BB_Lower"] = df["EMA20"] - df["Std"] * 2
+        # BB Squeeze: BandWidth thấp = đang tích lũy
+        df["BW"]       = (df["BB_Upper"] - df["BB_Lower"]) / df["EMA20"]
+        bw_min20       = df["BW"].rolling(20).min()
+        df["Squeeze"]  = df["BW"] <= bw_min20 * 1.05   # True = đang nén
+        # MACD
+        e1 = df["Close"].ewm(span=12, adjust=False).mean()
+        e2 = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"]   = e1 - e2
+        df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+        df["Hist"]   = df["MACD"] - df["Signal"]
+        # RSI
+        delta        = df["Close"].diff()
+        gain         = delta.where(delta > 0, 0).rolling(14).mean()
+        loss         = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        df["RSI"]    = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+        # Stochastic %K %D (14,3)
+        lo14         = df["Low"].rolling(14).min()
+        hi14         = df["High"].rolling(14).max()
+        df["Stoch_K"] = 100 * (df["Close"] - lo14) / (hi14 - lo14).replace(0, np.nan)
+        df["Stoch_D"] = df["Stoch_K"].rolling(3).mean()
+        # Volume spike: so với trung bình 20 phiên
+        df["Vol_MA20"]   = df["Volume"].rolling(20).mean() if "Volume" in df.columns else 1
+        df["Vol_Ratio"]  = df["Volume"] / df["Vol_MA20"].replace(0, np.nan) if "Volume" in df.columns else 1
         
-        troughs = [idx for idx in range(1, len(window_p)-1) if window_p[idx] < window_p[idx-1] and window_p[idx] < window_p[idx+1]]
-        peaks   = [idx for idx in range(1, len(window_p)-1) if window_p[idx] > window_p[idx-1] and window_p[idx] > window_p[idx+1]]
+        # Phân kỳ MACD (Divergence)
+        bull_divs = np.zeros(len(df), dtype=bool)
+        bear_divs = np.zeros(len(df), dtype=bool)
+        p = df["Close"].values
+        h = df["Hist"].values
+        for k in range(5, len(df)):
+            start_idx = max(0, k-15)
+            window_p = p[start_idx:k+1]
+            window_h = h[start_idx:k+1]
+            
+            troughs = [idx for idx in range(1, len(window_p)-1) if window_p[idx] < window_p[idx-1] and window_p[idx] < window_p[idx+1]]
+            peaks   = [idx for idx in range(1, len(window_p)-1) if window_p[idx] > window_p[idx-1] and window_p[idx] > window_p[idx+1]]
+            
+            if len(troughs) >= 2:
+                t1, t2 = troughs[-2], troughs[-1]
+                if window_p[t2] < window_p[t1] and window_h[t2] > window_h[t1]:
+                    if t2 >= len(window_p) - 3: 
+                        bull_divs[k] = True
+                        
+            if len(peaks) >= 2:
+                p1, p2 = peaks[-2], peaks[-1]
+                if window_p[p2] > window_p[p1] and window_h[p2] < window_h[p1]:
+                    if p2 >= len(window_p) - 3:
+                        bear_divs[k] = True
+                        
+        df["Bull_Div"] = bull_divs
+        df["Bear_Div"] = bear_divs
         
-        if len(troughs) >= 2:
-            t1, t2 = troughs[-2], troughs[-1]
-            if window_p[t2] < window_p[t1] and window_h[t2] > window_h[t1]:
-                if t2 >= len(window_p) - 3: 
-                    bull_divs[k] = True
-                    
-        if len(peaks) >= 2:
-            p1, p2 = peaks[-2], peaks[-1]
-            if window_p[p2] > window_p[p1] and window_h[p2] < window_h[p1]:
-                if p2 >= len(window_p) - 3:
-                    bear_divs[k] = True
-                    
-    df["Bull_Div"] = bull_divs
-    df["Bear_Div"] = bear_divs
-    
-    return df
+        return df
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {e}")
+        return df
 
 def calc_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return _calc_indicators(df)
@@ -340,39 +345,43 @@ def run_scan(interval: str = "1D"):
     buys, sells = [], []
     prog = st.sidebar.progress(0, text="Đang quét VN30...")
     for n, sym in enumerate(VN30_LIST):
-        # Dùng cache — không fetch lại nếu đã có
-        df = calc_indicators_cached(sym, interval)
-        if not df.empty:
-            update_price_store(sym, df)
-            zones  = detect_zones(df)
-            sig, sc = current_signal(df, zones)
-            div   = detect_divergence(df)
-            
-            # Check Multi-timeframe 1H
-            mtf_buy = False
-            if interval in ["1D", "1W"] and (df["RSI"].iloc[-1] < 45 or df["Close"].iloc[-1] <= df["BB_Lower"].iloc[-1]*1.03):
-                df_1h = calc_indicators_cached(sym, "1H")
-                if not df_1h.empty:
-                    z_1h = detect_zones(df_1h)
-                    s_1h, sc_1h = current_signal(df_1h, z_1h)
-                    if s_1h == "BUY" and sc_1h >= 2:
-                        mtf_buy = True
-            
-            store = st.session_state.get("price_store", {}).get(sym, {})
-            info  = {
-                "symbol":  sym,
-                "price":   store.get("today", 0),
-                "chg":     store.get("change_pct", 0),
-                "rsi":     round(df["RSI"].iloc[-1], 1) if "RSI" in df.columns else 0,
-                "score":   sc,
-                "div":     div,
-                "squeeze": bool(df["Squeeze"].iloc[-1]) if "Squeeze" in df.columns else False,
-                "mtf_buy": mtf_buy,
-            }
-            if sig == "BUY" or mtf_buy:
-                buys.append(info)
-            elif sig == "SELL": 
-                sells.append(info)
+        try:
+            # Dùng cache — không fetch lại nếu đã có
+            df = calc_indicators_cached(sym, interval)
+            if not df.empty:
+                update_price_store(sym, df)
+                zones  = detect_zones(df)
+                sig, sc = current_signal(df, zones)
+                div   = detect_divergence(df)
+                
+                # Check Multi-timeframe 1H
+                mtf_buy = False
+                if interval in ["1D", "1W"] and (df["RSI"].iloc[-1] < 45 or df["Close"].iloc[-1] <= df["BB_Lower"].iloc[-1]*1.03):
+                    df_1h = calc_indicators_cached(sym, "1H")
+                    if not df_1h.empty:
+                        z_1h = detect_zones(df_1h)
+                        s_1h, sc_1h = current_signal(df_1h, z_1h)
+                        if s_1h == "BUY" and sc_1h >= 2:
+                            mtf_buy = True
+                
+                store = st.session_state.get("price_store", {}).get(sym, {})
+                info  = {
+                    "symbol":  sym,
+                    "price":   store.get("today", 0),
+                    "chg":     store.get("change_pct", 0),
+                    "rsi":     round(df["RSI"].iloc[-1], 1) if "RSI" in df.columns else 0,
+                    "score":   sc,
+                    "div":     div,
+                    "squeeze": bool(df["Squeeze"].iloc[-1]) if "Squeeze" in df.columns else False,
+                    "mtf_buy": mtf_buy,
+                }
+                if sig == "BUY" or mtf_buy:
+                    buys.append(info)
+                elif sig == "SELL": 
+                    sells.append(info)
+        except Exception as e:
+            logger.warning(f"Scan error {sym}: {e}")
+        
         prog.progress((n + 1) / len(VN30_LIST), text=f"Đang quét: {sym}")
     prog.empty()
     buys.sort(key=lambda x: (x["score"], x["chg"]), reverse=True)
@@ -526,7 +535,7 @@ def build_chart(df: pd.DataFrame, symbol: str, zones: list[dict], interval: str)
 
 
 # ══════════════════════════════════════════
-# 8. Render bảng giá 2 ngày
+# 8. Render bảng giá 2 ngày — FIX applymap()
 # ══════════════════════════════════════════
 def render_price_table(buy_syms: set, sell_syms: set):
     store = st.session_state.get("price_store", {})
@@ -562,12 +571,23 @@ def render_price_table(buy_syms: set, sell_syms: set):
         if "BÁN" in str(val): return "background-color: rgba(255,60,60,0.2); font-size:15px"
         return "font-size:15px"
 
-    styled = (
-        df_tbl.style
-        .applymap(color_chg, subset=["% Thay đổi"])
-        .applymap(color_sig, subset=["Tín hiệu"])
-        .format({"% Thay đổi": "{:+.2f}%"})
-    )
+    try:
+        # FIX: map() thay cho applymap() (pandas 2.1+)
+        styled = (
+            df_tbl.style
+            .map(color_chg, subset=["% Thay đổi"])
+            .map(color_sig, subset=["Tín hiệu"])
+            .format({"% Thay đổi": "{:+.2f}%"})
+        )
+    except AttributeError:
+        # Fallback để compatible với pandas cũ
+        styled = (
+            df_tbl.style
+            .applymap(color_chg, subset=["% Thay đổi"])
+            .applymap(color_sig, subset=["Tín hiệu"])
+            .format({"% Thay đổi": "{:+.2f}%"})
+        )
+    
     st.dataframe(styled, use_container_width=True, height=350)
 
 
@@ -758,7 +778,7 @@ def main():
         df_main = load_data(selected, interval)
 
     if df_main.empty:
-        st.error(f"⚠️ Không tải được dữ liệu {selected} [{interval}]")
+        st.error(f"⚠️ Không tải được dữ liệu {selected} [{interval}]. Kiểm tra API hoặc khoá chứng chỉ.")
     else:
         df_main  = calc_indicators(df_main)
         update_price_store(selected, df_main)
@@ -837,7 +857,7 @@ def main():
                             st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
     else:
-        st.info("🔍 Chưa có dữ liệu quét — nhấn **‘Quét VN30 ngay’** ở sidebar để xãc định tín hiệu.")
+        st.info("🔍 Chưa có dữ liệu quét — nhấn **'Quét VN30 ngay'** ở sidebar để xãc định tín hiệu.")
 
     st.divider()
 
