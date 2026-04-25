@@ -3,3 +3,4 @@ pandas
 numpy
 plotly
 vnstock3
+ipython
